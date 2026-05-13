@@ -39,14 +39,13 @@ INLINE_REGEX = re.compile(
     re.IGNORECASE
 )
 
-
 # =========================================================
 # REMOVE COMMENTS
 # =========================================================
 
 def remove_comments(text):
 
-    # remove block comments
+    # Remove block comments
     text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
 
     cleaned_lines = []
@@ -55,7 +54,7 @@ def remove_comments(text):
 
         stripped = line.strip()
 
-        # remove // comments
+        # Skip single line comments
         if stripped.startswith("//"):
             continue
 
@@ -63,9 +62,8 @@ def remove_comments(text):
 
     return "\n".join(cleaned_lines)
 
-
 # =========================================================
-# EXTRACT TABS
+# EXTRACT TAB NAME
 # =========================================================
 
 def extract_tab_name(line, current_tab):
@@ -76,7 +74,6 @@ def extract_tab_name(line, current_tab):
         return match.group(1).strip()
 
     return current_tab
-
 
 # =========================================================
 # EXTRACT TABLE NAME
@@ -96,22 +93,97 @@ def extract_table_name(line, current_table):
 
     return current_table
 
+# =========================================================
+# SAFE FIELD SPLITTER
+# Handles commas inside functions/brackets/quotes
+# =========================================================
+
+def split_fields_safely(text):
+
+    fields = []
+
+    current = []
+
+    round_depth = 0
+    square_depth = 0
+
+    in_single_quote = False
+    in_double_quote = False
+
+    i = 0
+
+    while i < len(text):
+
+        ch = text[i]
+
+        # -----------------------------
+        # QUOTES
+        # -----------------------------
+
+        if ch == "'" and not in_double_quote:
+            in_single_quote = not in_single_quote
+            current.append(ch)
+            i += 1
+            continue
+
+        if ch == '"' and not in_single_quote:
+            in_double_quote = not in_double_quote
+            current.append(ch)
+            i += 1
+            continue
+
+        # -----------------------------
+        # BRACKET DEPTH
+        # -----------------------------
+
+        if not in_single_quote and not in_double_quote:
+
+            if ch == '(':
+                round_depth += 1
+
+            elif ch == ')':
+                round_depth -= 1
+
+            elif ch == '[':
+                square_depth += 1
+
+            elif ch == ']':
+                square_depth -= 1
+
+            # -----------------------------
+            # TOP LEVEL COMMA
+            # -----------------------------
+
+            elif (
+                ch == ','
+                and round_depth == 0
+                and square_depth == 0
+            ):
+
+                field = ''.join(current).strip()
+
+                if field:
+                    fields.append(field)
+
+                current = []
+
+                i += 1
+                continue
+
+        current.append(ch)
+
+        i += 1
+
+    # Final field
+    final_field = ''.join(current).strip()
+
+    if final_field:
+        fields.append(final_field)
+
+    return fields
 
 # =========================================================
-# CLEAN FIELD
-# =========================================================
-
-def clean_field(field):
-
-    field = field.strip()
-
-    field = re.sub(r',$', '', field)
-
-    return field.strip()
-
-
-# =========================================================
-# EXTRACT FIELDS
+# EXTRACT LOAD FIELDS
 # =========================================================
 
 def extract_fields(load_block):
@@ -122,6 +194,8 @@ def extract_fields(load_block):
 
     collecting = False
 
+    collected_text = []
+
     for line in lines:
 
         stripped = line.strip()
@@ -129,7 +203,10 @@ def extract_fields(load_block):
         if not stripped:
             continue
 
-        # start collecting after LOAD
+        # -----------------------------
+        # START COLLECTING AFTER LOAD
+        # -----------------------------
+
         if re.search(r'\bLOAD\b', stripped, re.IGNORECASE):
 
             collecting = True
@@ -142,21 +219,19 @@ def extract_fields(load_block):
             ).strip()
 
             if stripped:
-                line_fields = stripped.split(',')
-
-                for fld in line_fields:
-                    cleaned = clean_field(fld)
-
-                    if cleaned:
-                        fields.append(cleaned)
+                collected_text.append(stripped)
 
             continue
+
+        # -----------------------------
+        # COLLECT FIELD LINES
+        # -----------------------------
 
         if collecting:
 
             upper = stripped.upper()
 
-            # stop conditions
+            # Stop collection
             if (
                 upper.startswith("FROM")
                 or upper.startswith("RESIDENT")
@@ -168,17 +243,26 @@ def extract_fields(load_block):
             ):
                 break
 
-            line_fields = stripped.split(',')
+            collected_text.append(stripped)
 
-            for fld in line_fields:
+    # Combine all field text
+    full_text = ' '.join(collected_text)
 
-                cleaned = clean_field(fld)
+    # Split safely
+    split_result = split_fields_safely(full_text)
 
-                if cleaned:
-                    fields.append(cleaned)
+    for fld in split_result:
+
+        fld = fld.strip()
+
+        fld = re.sub(r',$', '', fld)
+
+        fld = fld.strip()
+
+        if fld:
+            fields.append(fld)
 
     return fields
-
 
 # =========================================================
 # EXTRACT SQL FIELDS
@@ -189,6 +273,8 @@ def extract_sql_fields(block):
     fields = []
 
     collecting = False
+
+    collected_text = []
 
     for line in block.splitlines():
 
@@ -206,11 +292,7 @@ def extract_sql_fields(block):
             ).strip()
 
             if stripped:
-                for fld in stripped.split(','):
-                    fld = clean_field(fld)
-
-                    if fld:
-                        fields.append(fld)
+                collected_text.append(stripped)
 
             continue
 
@@ -219,15 +301,24 @@ def extract_sql_fields(block):
             if stripped.upper().startswith("FROM"):
                 break
 
-            for fld in stripped.split(','):
+            collected_text.append(stripped)
 
-                fld = clean_field(fld)
+    full_text = ' '.join(collected_text)
 
-                if fld:
-                    fields.append(fld)
+    split_result = split_fields_safely(full_text)
+
+    for fld in split_result:
+
+        fld = fld.strip()
+
+        fld = re.sub(r',$', '', fld)
+
+        fld = fld.strip()
+
+        if fld:
+            fields.append(fld)
 
     return fields
-
 
 # =========================================================
 # EXTRACT FROM
@@ -237,7 +328,10 @@ def extract_from(block):
 
     lines = [x.strip() for x in block.splitlines() if x.strip()]
 
+    # -----------------------------------------------------
     # RESIDENT
+    # -----------------------------------------------------
+
     for line in lines:
 
         resident_match = RESIDENT_REGEX.search(line)
@@ -245,13 +339,19 @@ def extract_from(block):
         if resident_match:
             return f"RESIDENT {resident_match.group(1)}"
 
+    # -----------------------------------------------------
     # INLINE
+    # -----------------------------------------------------
+
     for line in lines:
 
         if INLINE_REGEX.search(line):
             return "INLINE"
 
+    # -----------------------------------------------------
     # SQL FROM
+    # -----------------------------------------------------
+
     sql_mode = False
 
     for line in lines:
@@ -272,7 +372,10 @@ def extract_from(block):
 
             return from_val
 
+    # -----------------------------------------------------
     # NORMAL FROM
+    # -----------------------------------------------------
+
     for idx, line in enumerate(lines):
 
         if line.upper().startswith("FROM"):
@@ -289,7 +392,6 @@ def extract_from(block):
             if first:
                 from_lines.append(first)
 
-            # capture multiline FROM
             j = idx + 1
 
             while j < len(lines):
@@ -309,7 +411,7 @@ def extract_from(block):
 
                 from_lines.append(nxt)
 
-                # stop after qualifier
+                # Stop after qualifier block
                 if ")" in nxt:
                     break
 
@@ -324,7 +426,6 @@ def extract_from(block):
             return result.strip()
 
     return ""
-
 
 # =========================================================
 # SPLIT INTO BLOCKS
@@ -351,7 +452,6 @@ def split_blocks(content):
 
     return blocks
 
-
 # =========================================================
 # MAIN PARSER
 # =========================================================
@@ -376,6 +476,10 @@ def parse_qvs(filepath):
 
         lines = block.splitlines()
 
+        # -------------------------------------------------
+        # Update tab/table context
+        # -------------------------------------------------
+
         for line in lines:
 
             current_tab = extract_tab_name(
@@ -390,8 +494,16 @@ def parse_qvs(filepath):
 
         fields = []
 
+        # -------------------------------------------------
+        # LOAD fields
+        # -------------------------------------------------
+
         if LOAD_START_REGEX.search(block):
             fields.extend(extract_fields(block))
+
+        # -------------------------------------------------
+        # SQL fields
+        # -------------------------------------------------
 
         if SQL_SELECT_REGEX.search(block):
             fields.extend(extract_sql_fields(block))
@@ -400,6 +512,10 @@ def parse_qvs(filepath):
             continue
 
         from_value = extract_from(block)
+
+        # -------------------------------------------------
+        # Add rows
+        # -------------------------------------------------
 
         for field in fields:
 
@@ -423,7 +539,6 @@ def parse_qvs(filepath):
 
     return rows
 
-
 # =========================================================
 # WRITE CSV
 # =========================================================
@@ -443,7 +558,6 @@ def write_csv(rows, output_file):
 
         writer.writerows(rows)
 
-
 # =========================================================
 # MAIN
 # =========================================================
@@ -452,7 +566,7 @@ def main():
 
     if len(sys.argv) != 2:
 
-        print("Usage:")
+        print("\nUsage:")
         print("python script.py input.qvs")
 
         sys.exit(1)
@@ -461,7 +575,7 @@ def main():
 
     if not input_file.exists():
 
-        print("File not found.")
+        print("\nFile not found.")
         sys.exit(1)
 
     output_file = input_file.with_suffix(".csv")
@@ -470,11 +584,10 @@ def main():
 
     write_csv(rows, output_file)
 
-    print(f"\nCSV created:")
+    print(f"\nCSV created successfully:")
     print(output_file)
 
-    print(f"\nTotal rows: {len(rows)}")
-
+    print(f"\nTotal rows extracted: {len(rows)}")
 
 if __name__ == "__main__":
     main()
