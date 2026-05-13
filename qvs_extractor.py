@@ -4,276 +4,402 @@ import sys
 from pathlib import Path
 
 # =========================================================
-# QVS Parser
-# Extracts:
-# Tab Name | Table Name | Field | From
+# ADVANCED QVS PARSER
 # =========================================================
 
-TAB_PATTERN = re.compile(r'^\s*///\$tab\s+(.*)', re.IGNORECASE)
-TABLE_LABEL_PATTERN = re.compile(r'^\s*([A-Za-z0-9_\-\s]+)\s*:\s*$')
-JOIN_PATTERN = re.compile(
-    r'^\s*(LEFT|RIGHT|INNER|OUTER|FULL)?\s*JOIN\s*\(\s*([^)]+)\s*\)',
+TAB_REGEX = re.compile(r'^\s*///\$tab\s+(.*)', re.IGNORECASE)
+
+TABLE_REGEX = re.compile(
+    r'^\s*([A-Za-z0-9_]+)\s*:\s*$',
     re.IGNORECASE
 )
 
-FROM_PATTERN = re.compile(
-    r'FROM\s+\[(.*?)\]\s*(\([^)]+\))?',
-    re.IGNORECASE | re.DOTALL
-)
-
-FROM_NO_BRACKET_PATTERN = re.compile(
-    r'FROM\s+([^\s;]+)\s*(\([^)]+\))?',
-    re.IGNORECASE | re.DOTALL
-)
-
-RESIDENT_PATTERN = re.compile(
-    r'RESIDENT\s+([A-Za-z0-9_]+)',
+JOIN_REGEX = re.compile(
+    r'(LEFT|RIGHT|INNER|OUTER|FULL)?\s*JOIN\s*\(\s*([^)]+)\s*\)',
     re.IGNORECASE
 )
 
-SQL_FROM_PATTERN = re.compile(
-    r'FROM\s+([A-Za-z0-9_.]+)',
-    re.IGNORECASE
-)
-
-INLINE_PATTERN = re.compile(
-    r'INLINE\s*\[',
-    re.IGNORECASE
-)
-
-LOAD_PATTERN = re.compile(
+LOAD_START_REGEX = re.compile(
     r'\bLOAD\b',
     re.IGNORECASE
 )
 
-SQL_SELECT_PATTERN = re.compile(
+SQL_SELECT_REGEX = re.compile(
     r'\bSQL\s+SELECT\b',
     re.IGNORECASE
 )
 
+RESIDENT_REGEX = re.compile(
+    r'RESIDENT\s+([A-Za-z0-9_]+)',
+    re.IGNORECASE
+)
+
+INLINE_REGEX = re.compile(
+    r'INLINE\s*\[',
+    re.IGNORECASE
+)
+
+
+# =========================================================
+# REMOVE COMMENTS
+# =========================================================
 
 def remove_comments(text):
-    """
-    Remove:
-    - // comments
-    - /* */ comments
-    """
+
+    # remove block comments
     text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
-    text = re.sub(r'//.*', '', text)
-    return text
 
-
-def split_statements(text):
-    """
-    Split QVS script into statements using semicolon.
-    """
-    statements = []
-    current = []
+    cleaned_lines = []
 
     for line in text.splitlines():
-        current.append(line)
 
-        if ';' in line:
-            statements.append('\n'.join(current))
-            current = []
+        stripped = line.strip()
 
-    if current:
-        statements.append('\n'.join(current))
+        # remove // comments
+        if stripped.startswith("//"):
+            continue
 
-    return statements
+        cleaned_lines.append(line)
 
+    return "\n".join(cleaned_lines)
+
+
+# =========================================================
+# EXTRACT TABS
+# =========================================================
+
+def extract_tab_name(line, current_tab):
+
+    match = TAB_REGEX.match(line)
+
+    if match:
+        return match.group(1).strip()
+
+    return current_tab
+
+
+# =========================================================
+# EXTRACT TABLE NAME
+# =========================================================
+
+def extract_table_name(line, current_table):
+
+    table_match = TABLE_REGEX.match(line)
+
+    if table_match:
+        return table_match.group(1).strip()
+
+    join_match = JOIN_REGEX.search(line)
+
+    if join_match:
+        return join_match.group(2).strip()
+
+    return current_table
+
+
+# =========================================================
+# CLEAN FIELD
+# =========================================================
 
 def clean_field(field):
+
     field = field.strip()
 
-    # Remove trailing commas
     field = re.sub(r',$', '', field)
 
     return field.strip()
 
 
-def extract_load_fields(statement):
-    """
-    Extract fields from LOAD blocks.
-    """
+# =========================================================
+# EXTRACT FIELDS
+# =========================================================
+
+def extract_fields(load_block):
+
     fields = []
 
-    load_matches = list(re.finditer(r'\bLOAD\b', statement, re.IGNORECASE))
+    lines = load_block.splitlines()
 
-    for idx, match in enumerate(load_matches):
+    collecting = False
 
-        start = match.end()
+    for line in lines:
 
-        remaining = statement[start:]
+        stripped = line.strip()
 
-        stop_patterns = [
-            r'\bFROM\b',
-            r'\bRESIDENT\b',
-            r'\bINLINE\b',
-            r'\bSQL\b',
-            r';'
-        ]
+        if not stripped:
+            continue
 
-        stop_positions = []
+        # start collecting after LOAD
+        if re.search(r'\bLOAD\b', stripped, re.IGNORECASE):
 
-        for pat in stop_patterns:
-            m = re.search(pat, remaining, re.IGNORECASE)
-            if m:
-                stop_positions.append(m.start())
+            collecting = True
 
-        if stop_positions:
-            end_pos = min(stop_positions)
-            load_block = remaining[:end_pos]
-        else:
-            load_block = remaining
+            stripped = re.sub(
+                r'.*?\bLOAD\b',
+                '',
+                stripped,
+                flags=re.IGNORECASE
+            ).strip()
 
-        raw_fields = load_block.split(',')
+            if stripped:
+                line_fields = stripped.split(',')
 
-        for field in raw_fields:
-            cleaned = clean_field(field)
+                for fld in line_fields:
+                    cleaned = clean_field(fld)
 
-            if cleaned:
-                fields.append(cleaned)
+                    if cleaned:
+                        fields.append(cleaned)
+
+            continue
+
+        if collecting:
+
+            upper = stripped.upper()
+
+            # stop conditions
+            if (
+                upper.startswith("FROM")
+                or upper.startswith("RESIDENT")
+                or upper.startswith("INLINE")
+                or upper.startswith("WHERE")
+                or upper.startswith("GROUP BY")
+                or upper.startswith("ORDER BY")
+                or upper.startswith("SQL")
+            ):
+                break
+
+            line_fields = stripped.split(',')
+
+            for fld in line_fields:
+
+                cleaned = clean_field(fld)
+
+                if cleaned:
+                    fields.append(cleaned)
 
     return fields
 
 
-def extract_sql_fields(statement):
-    """
-    Extract fields from SQL SELECT blocks.
-    """
+# =========================================================
+# EXTRACT SQL FIELDS
+# =========================================================
+
+def extract_sql_fields(block):
+
     fields = []
 
-    sql_match = re.search(
-        r'SQL\s+SELECT(.*?)FROM',
-        statement,
-        re.IGNORECASE | re.DOTALL
-    )
+    collecting = False
 
-    if sql_match:
-        field_block = sql_match.group(1)
+    for line in block.splitlines():
 
-        raw_fields = field_block.split(',')
+        stripped = line.strip()
 
-        for field in raw_fields:
-            cleaned = clean_field(field)
+        if re.search(r'SQL\s+SELECT', stripped, re.IGNORECASE):
 
-            if cleaned:
-                fields.append(cleaned)
+            collecting = True
+
+            stripped = re.sub(
+                r'SQL\s+SELECT',
+                '',
+                stripped,
+                flags=re.IGNORECASE
+            ).strip()
+
+            if stripped:
+                for fld in stripped.split(','):
+                    fld = clean_field(fld)
+
+                    if fld:
+                        fields.append(fld)
+
+            continue
+
+        if collecting:
+
+            if stripped.upper().startswith("FROM"):
+                break
+
+            for fld in stripped.split(','):
+
+                fld = clean_field(fld)
+
+                if fld:
+                    fields.append(fld)
 
     return fields
 
 
-def extract_from(statement):
-    """
-    Extract FROM source.
-    """
+# =========================================================
+# EXTRACT FROM
+# =========================================================
+
+def extract_from(block):
+
+    lines = [x.strip() for x in block.splitlines() if x.strip()]
 
     # RESIDENT
-    resident_match = RESIDENT_PATTERN.search(statement)
-    if resident_match:
-        return f"RESIDENT {resident_match.group(1).strip()}"
+    for line in lines:
+
+        resident_match = RESIDENT_REGEX.search(line)
+
+        if resident_match:
+            return f"RESIDENT {resident_match.group(1)}"
 
     # INLINE
-    if INLINE_PATTERN.search(statement):
-        return "INLINE"
+    for line in lines:
+
+        if INLINE_REGEX.search(line):
+            return "INLINE"
 
     # SQL FROM
-    if SQL_SELECT_PATTERN.search(statement):
-        sql_from = SQL_FROM_PATTERN.search(statement)
+    sql_mode = False
 
-        if sql_from:
-            return sql_from.group(1).strip()
+    for line in lines:
 
-    # Standard FROM [file]
-    from_match = FROM_PATTERN.search(statement)
+        if re.search(r'SQL\s+SELECT', line, re.IGNORECASE):
+            sql_mode = True
 
-    if from_match:
-        source = from_match.group(1).strip()
-        qualifier = from_match.group(2) or ''
+        if sql_mode and line.upper().startswith("FROM"):
 
-        return f"{source} {qualifier}".strip()
+            from_val = re.sub(
+                r'^FROM',
+                '',
+                line,
+                flags=re.IGNORECASE
+            ).strip()
 
-    # FROM without brackets
-    from_match = FROM_NO_BRACKET_PATTERN.search(statement)
+            from_val = from_val.rstrip(';')
 
-    if from_match:
-        source = from_match.group(1).strip()
-        qualifier = from_match.group(2) or ''
+            return from_val
 
-        return f"{source} {qualifier}".strip()
+    # NORMAL FROM
+    for idx, line in enumerate(lines):
+
+        if line.upper().startswith("FROM"):
+
+            from_lines = []
+
+            first = re.sub(
+                r'^FROM',
+                '',
+                line,
+                flags=re.IGNORECASE
+            ).strip()
+
+            if first:
+                from_lines.append(first)
+
+            # capture multiline FROM
+            j = idx + 1
+
+            while j < len(lines):
+
+                nxt = lines[j]
+
+                upper = nxt.upper()
+
+                if (
+                    upper.startswith("WHERE")
+                    or upper.startswith("GROUP BY")
+                    or upper.startswith("ORDER BY")
+                    or upper.startswith("LOAD")
+                    or upper.startswith("SQL")
+                ):
+                    break
+
+                from_lines.append(nxt)
+
+                # stop after qualifier
+                if ")" in nxt:
+                    break
+
+                j += 1
+
+            result = " ".join(from_lines)
+
+            result = result.replace("[", "").replace("]", "")
+
+            result = result.rstrip(";")
+
+            return result.strip()
 
     return ""
 
 
-def extract_table_name(statement, current_table_name):
-    """
-    Determine table name.
-    """
+# =========================================================
+# SPLIT INTO BLOCKS
+# =========================================================
 
-    lines = statement.splitlines()
+def split_blocks(content):
 
-    for line in lines:
+    blocks = []
 
-        # Explicit table label
-        table_match = TABLE_LABEL_PATTERN.match(line)
+    current = []
 
-        if table_match:
-            return table_match.group(1).strip()
+    for line in content.splitlines():
 
-        # JOIN target
-        join_match = JOIN_PATTERN.match(line)
+        current.append(line)
 
-        if join_match:
-            return join_match.group(2).strip()
+        if ';' in line:
 
-    return current_table_name or "UNNAMED_TABLE"
+            blocks.append("\n".join(current))
 
+            current = []
 
-def extract_tab_name(statement, current_tab):
-    """
-    Extract tab name from ///$tab
-    """
-    lines = statement.splitlines()
+    if current:
+        blocks.append("\n".join(current))
 
-    for line in lines:
-        tab_match = TAB_PATTERN.match(line)
-
-        if tab_match:
-            return tab_match.group(1).strip()
-
-    return current_tab
+    return blocks
 
 
-def process_qvs(qvs_path):
-    with open(qvs_path, 'r', encoding='utf-8', errors='ignore') as f:
+# =========================================================
+# MAIN PARSER
+# =========================================================
+
+def parse_qvs(filepath):
+
+    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
         content = f.read()
 
     content = remove_comments(content)
 
-    statements = split_statements(content)
+    blocks = split_blocks(content)
 
     rows = []
+
     seen = set()
 
-    current_tab = ""
-    current_table = ""
+    current_tab = "MAIN"
+    current_table = "UNNAMED_TABLE"
 
-    for statement in statements:
+    for block in blocks:
 
-        current_tab = extract_tab_name(statement, current_tab)
+        lines = block.splitlines()
 
-        current_table = extract_table_name(statement, current_table)
+        for line in lines:
 
-        from_value = extract_from(statement)
+            current_tab = extract_tab_name(
+                line,
+                current_tab
+            )
+
+            current_table = extract_table_name(
+                line,
+                current_table
+            )
 
         fields = []
 
-        if LOAD_PATTERN.search(statement):
-            fields.extend(extract_load_fields(statement))
+        if LOAD_START_REGEX.search(block):
+            fields.extend(extract_fields(block))
 
-        if SQL_SELECT_PATTERN.search(statement):
-            fields.extend(extract_sql_fields(statement))
+        if SQL_SELECT_REGEX.search(block):
+            fields.extend(extract_sql_fields(block))
+
+        if not fields:
+            continue
+
+        from_value = extract_from(block)
 
         for field in fields:
 
@@ -285,6 +411,7 @@ def process_qvs(qvs_path):
             )
 
             if row not in seen:
+
                 seen.add(row)
 
                 rows.append([
@@ -297,43 +424,55 @@ def process_qvs(qvs_path):
     return rows
 
 
-def write_csv(rows, output_path):
+# =========================================================
+# WRITE CSV
+# =========================================================
 
-    with open(output_path, 'w', newline='', encoding='utf-8') as csvfile:
+def write_csv(rows, output_file):
 
-        writer = csv.writer(csvfile)
+    with open(output_file, 'w', newline='', encoding='utf-8') as f:
+
+        writer = csv.writer(f)
 
         writer.writerow([
-            'Tab Name',
-            'Table Name',
-            'Field',
-            'From'
+            "Tab Name",
+            "Table Name",
+            "Field",
+            "From"
         ])
 
         writer.writerows(rows)
 
 
+# =========================================================
+# MAIN
+# =========================================================
+
 def main():
 
     if len(sys.argv) != 2:
+
         print("Usage:")
         print("python script.py input.qvs")
+
         sys.exit(1)
 
-    input_path = Path(sys.argv[1])
+    input_file = Path(sys.argv[1])
 
-    if not input_path.exists():
-        print(f"File not found: {input_path}")
+    if not input_file.exists():
+
+        print("File not found.")
         sys.exit(1)
 
-    output_path = input_path.with_suffix('.csv')
+    output_file = input_file.with_suffix(".csv")
 
-    rows = process_qvs(input_path)
+    rows = parse_qvs(input_file)
 
-    write_csv(rows, output_path)
+    write_csv(rows, output_file)
 
-    print(f"\nCSV generated successfully:")
-    print(output_path)
+    print(f"\nCSV created:")
+    print(output_file)
+
     print(f"\nTotal rows: {len(rows)}")
 
 
